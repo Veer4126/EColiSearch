@@ -75,16 +75,16 @@ for attempt, trial_seed in enumerate(seeds, start=1):
         batch_size=256,
         tau=0.005,
         gamma=0.90,
-        train_freq=1,
-        gradient_steps=2,
+        train_freq=8,
+        gradient_steps=4,
         ent_coef="auto"
     )
 
     callback = TrainingStatsCallback(verbose=1)
 
-    # Create checkpoint callback to save every 300K steps
+    # Create checkpoint callback to save every 25K steps
     checkpoint_callback = ModelAndMetricsCheckpointCallback(
-        save_freq=30_000,
+        save_freq=25_000,
         save_path="RL_models",
         trial_number=trial_number,
         trial_seed=trial_seed,
