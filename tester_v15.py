@@ -1,0 +1,424 @@
+import gym
+from c_elegans_env_v15 import CEMazeEnv2, TrainingStatsCallback, ModelAndMetricsCheckpointCallback # type: ignore
+import matplotlib.pyplot as plt
+from stable_baselines3 import SAC
+from stable_baselines3.common.callbacks import BaseCallback
+import torch as th
+import numpy as np
+from collections import Counter
+import os
+import pickle
+from datetime import datetime
+
+
+# Define seeds and trial number
+trial_number = 31
+seeds = [1, 2]
+
+# Create main output directories
+os.makedirs("RL_models", exist_ok=True)
+os.makedirs("training_plots", exist_ok=True)
+
+for attempt, trial_seed in enumerate(seeds, start=1):
+    print(f"\n[INFO] Starting Trial {trial_number} Attempt {trial_seed} with seed {trial_seed}...\n")
+
+    # Set seeds
+    np.random.seed(trial_seed)
+    th.manual_seed(trial_seed)
+
+    # Set up environment
+    env = CEMazeEnv2()
+    env.seed(trial_seed)
+
+    # Define SAC model
+    model = SAC(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        learning_rate=3e-4,
+        buffer_size=300_000, # 150K for 500K iterations
+        learning_starts=1000,
+        batch_size=256,
+        tau=0.01,
+        gamma=0.99,
+        train_freq=1,
+        gradient_steps=2,
+        ent_coef="auto"
+    )
+
+    callback = TrainingStatsCallback(verbose=1)
+
+    # Create checkpoint callback to save every 300K steps
+    checkpoint_callback = ModelAndMetricsCheckpointCallback(
+        save_freq=100_000,
+        save_path="RL_models",
+        trial_number=trial_number,
+        trial_seed=trial_seed,
+        stats_callback=callback,  # <-- this is your TrainingStatsCallback
+        verbose=1
+    )
+
+    # Combine with your existing training stats callback
+    from stable_baselines3.common.callbacks import CallbackList
+    combined_callback = CallbackList([callback, checkpoint_callback])
+
+    model.learn(total_timesteps=1_000_000, callback=combined_callback)
+
+    # Save model
+    model_filename = f"RL_models/trial{trial_number}_atmp{trial_seed}_sac_1M" # 2.5 M or 600K
+    model.save(model_filename)
+    print(model.actor)
+    for name, layer in model.actor.named_modules():
+        print(name, layer)
+
+
+    with open(f"RL_models/trial{trial_number}_atmp{trial_seed}_replay_buffer.pkl", "wb") as f:
+        pickle.dump(model.replay_buffer, f)
+
+    # ==== PLOTTING AND SAVING METRICS ====
+    save_dir = f"training_plots/trial{trial_number}_atmp{trial_seed}"
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Collect and validate callback data
+    if len(callback.mean_actions) > 0:
+        mean_actions = np.vstack(callback.mean_actions)
+        stddevs = np.vstack(callback.stddevs)
+        entropies = np.array(callback.entropies)
+    else:
+        mean_actions = np.empty((0, 2))
+        stddevs = np.empty((0, 2))
+        entropies = np.empty((0,))
+
+    episode_rewards = np.array(callback.episode_rewards)
+
+    def plot_metrics():
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT 4 TRAINING METRICS- MEAN, STD DEV, ENTROPY, EPISODIC RETURN
+        plt.figure(figsize=(14, 8))
+
+        # Mean Rate Constants
+        plt.subplot(2, 2, 1)
+        plt.plot(mean_actions[:, 0], label='Mean p_w2r', linewidth=0.8)
+        plt.plot(mean_actions[:, 1], label='Mean p_r2w', linewidth=0.8)
+        plt.title("Mean Probabilities Over Time")
+        plt.xlabel("Step")
+        plt.ylabel("Mean Value")
+        plt.grid(True)
+        plt.legend()
+
+        # Std Dev of Rate Constants
+        plt.subplot(2, 2, 2)
+        plt.plot(stddevs[:, 0], label='Stddev p_w2r', linewidth=0.8)
+        plt.plot(stddevs[:, 1], label='Stddev p_r2w', linewidth=0.8)
+        plt.title("Stddev of Probabilities Over Time")
+        plt.xlabel("Step")
+        plt.ylabel("Stddev")
+        plt.grid(True)
+        plt.legend()
+
+        # Entropy of Policy
+        plt.subplot(2, 2, 3)
+        plt.plot(entropies, label='Entropy', color='green', linewidth=0.8)
+        plt.title("Policy Entropy Over Time")
+        plt.xlabel("Step")
+        plt.ylabel("Entropy")
+        plt.grid(True)
+        plt.legend()
+
+        # Episodic Return
+        plt.subplot(2, 2, 4)
+        plt.plot(episode_rewards, label='Raw Episodic Return', alpha=0.4, linewidth=0.7, color='purple')
+        if len(episode_rewards) >= 100:
+            rolling_avg = np.convolve(episode_rewards, np.ones(100) / 100, mode='valid')
+            plt.plot(range(99, len(episode_rewards)), rolling_avg, color='red', label='100-Episode Rolling Avg', linewidth=1.5)
+        plt.title("Episodic Return Over Training")
+        plt.xlabel("Episode")
+        plt.ylabel("Return")
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "policy_outputs_and_rewards.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT TARGET HIT RATE PER EPISODE (BINARY) AND NUMBER OF TARGETs HIT PER EPISODE
+        hits = np.array([1 if e == "hit" else 0 for e in callback.episode_end_types])
+        target_hits = np.array(callback.target_hits)
+        window_size = 100
+
+        # Compute Rolling Averages
+        if len(hits) >= window_size:
+            rolling_hit_rate = np.convolve(hits, np.ones(window_size)/window_size, mode='valid')
+        else:
+            rolling_hit_rate = []
+
+        if len(target_hits) >= window_size:
+            rolling_hits = np.convolve(target_hits, np.ones(window_size)/window_size, mode='valid')
+        else:
+            rolling_hits = []
+
+        # Plot
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+        # Subplot 1: Target Hit Rate (Binary)
+        axs[0].plot(hits, color='green', alpha=0.3, label='Binary Hit (1=Hit, 0=Timeout)')
+        if len(rolling_hit_rate):
+            axs[0].plot(range(window_size - 1, len(hits)), rolling_hit_rate, color='green', label=f'{window_size}-Episode Rolling Avg')
+        axs[0].set_title("Target Hit Rate per Episode")
+        axs[0].set_ylabel("Fraction of Hits")
+        axs[0].legend()
+        axs[0].grid(True)
+
+        # Subplot 2: Target Hits per Episode
+        axs[1].plot(target_hits, color='blue', alpha=0.3, label='Raw Target Hits per Episode')
+        if len(rolling_hits):
+            axs[1].plot(range(window_size - 1, len(target_hits)), rolling_hits, color='blue', label=f'{window_size}-Episode Rolling Avg')
+        axs[1].set_title("Number of Target Hits per Episode")
+        axs[1].set_xlabel("Episode")
+        axs[1].set_ylabel("Hit Count")
+        axs[1].legend()
+        axs[1].grid(True)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "hit_rate_and_total_hits.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT THE MOTION STATE HISTOGRAM
+        motion_counts = Counter(callback.all_motion_history)
+        states = list(motion_counts.keys())
+        counts = list(motion_counts.values())
+
+        plt.figure(figsize=(6, 4))
+        plt.bar(states, counts, color=["blue", "orange"])
+        plt.title("Motion Type Frequency (Walk vs Reorient)")
+        plt.xlabel("Motion State")
+        plt.ylabel("Count")
+        plt.grid(True, axis='y')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "motion_state_histogram.png"))
+        plt.close()
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT WALK VS REORIENT PER EPISODE
+        if len(callback.walk_vs_reorient_ratio) > 0:
+            walk_percentages, reorient_percentages = zip(*callback.walk_vs_reorient_ratio)
+
+            plt.figure(figsize=(10, 4))
+            plt.plot(walk_percentages, label="Walk %", color="blue", alpha=0.6)
+            plt.plot(reorient_percentages, label="Reorient %", color="orange", alpha=0.6)
+
+            window = 100
+            if len(walk_percentages) >= window:
+                walk_smooth = np.convolve(walk_percentages, np.ones(window)/window, mode='valid')
+                reorient_smooth = np.convolve(reorient_percentages, np.ones(window)/window, mode='valid')
+                plt.plot(range(window-1, len(walk_percentages)), walk_smooth, color="blue", label="Walk % (rolling avg)")
+                plt.plot(range(window-1, len(reorient_percentages)), reorient_smooth, color="orange", label="Reorient % (rolling avg)")
+
+            plt.title("Walk vs Reorient Percentages Per Episode")
+            plt.xlabel("Episode")
+            plt.ylabel("Percentage")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, "walk_vs_reorient_percentages.png"))
+            plt.close()
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT THE SAMPLED CONCENTRATION TRACES ACROSS TRAINING
+
+        # Define the bucket size (e.g., 100 episodes per bucket)
+        bucket_size = 200
+        max_steps = 500  # Or the maximum number of steps per episode
+        window_size = 30  # Smoothing window for the concentration traces
+
+        # Calculate the total number of buckets based on the number of episodes available
+        num_buckets = len(callback.episode_concentrations) // bucket_size
+
+        # Initialize an array to hold the average concentration for each bucket
+        average_concentrations = []
+
+        # Loop over each bucket
+        for bucket_idx in range(num_buckets):
+            # Get the episodes in the current bucket
+            start_idx = bucket_idx * bucket_size
+            end_idx = (bucket_idx + 1) * bucket_size
+            bucket_concentrations = []
+
+            # For each episode in the current bucket, retrieve the concentration trace
+            for episode_idx in range(start_idx, end_idx):
+                conc_trace = np.array(callback.episode_concentrations[episode_idx])
+                
+                # If the concentration trace is shorter than max_steps, pad it with NaN
+                if len(conc_trace) < max_steps:
+                    conc_trace = np.pad(conc_trace, (0, max_steps - len(conc_trace)), constant_values=np.nan)
+                
+                # Append to the list of concentrations for the current bucket
+                bucket_concentrations.append(conc_trace)
+
+            # Stack the concentrations for all episodes in the bucket and calculate the average
+            bucket_concentrations = np.vstack(bucket_concentrations)
+            avg_conc_per_step = np.nanmean(bucket_concentrations, axis=0)  # Ignore NaNs while calculating the mean
+            average_concentrations.append(avg_conc_per_step)
+
+        # Now plot the average concentrations for each bucket
+        average_concentrations = np.array(average_concentrations)
+
+        # Plot the smoothed concentration traces across buckets
+        plt.figure(figsize=(12, 6))
+        for bucket_idx in range(average_concentrations.shape[0]):
+            smoothed = np.convolve(average_concentrations[bucket_idx], np.ones(window_size) / window_size, mode='valid')
+            plt.plot(range(window_size - 1, max_steps), smoothed, label=f'Bucket {bucket_idx+1} ({bucket_idx*bucket_size + 1}-{(bucket_idx+1)*bucket_size})', linewidth=1.5)
+
+        plt.title("Smoothed Concentration Traces Across Episode Buckets")
+        plt.xlabel("Step")
+        plt.ylabel("Average Concentration")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "concentration_traces.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # PLOT 2 TRAINING METRICS BASED ON DISTANCES TO PROVE AGENTIC LEARNING
+        # Plot 4 separate training metrics: Wrapped & Unwrapped Avg Distance and ΔDistance
+        plt.figure(figsize=(18, 10))
+
+        # 1. Wrapped Avg Distance to Target
+        plt.subplot(1, 2, 1)
+        plt.plot(callback.episode_avg_wrapped_distances, label="Wrapped Avg Dist to Target", color='blue')
+        plt.title("Wrapped Avg Distance to Target per Episode")
+        plt.xlabel("Episode")
+        plt.ylabel("Distance")
+        plt.grid(True)
+        plt.legend()
+
+        # 2. Unwrapped Avg Distance to Target
+        plt.subplot(1, 2, 2)
+        plt.plot(callback.episode_avg_unwrapped_distances, label="Unwrapped Avg Dist to Target", color='green')
+        plt.title("Unwrapped Avg Distance to Target per Episode")
+        plt.xlabel("Episode")
+        plt.ylabel("Distance")
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "distance_metrics_separated.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # GRADIENT CLIMB RATE
+        plt.figure(figsize=(10, 4))
+        plt.plot(callback.episode_avg_conc_delta, color='orange', alpha=0.4, label="Avg ΔC per Step")
+
+        window = 100
+        if len(callback.episode_avg_conc_delta) >= window:
+            rolling_gradient = np.convolve(callback.episode_avg_conc_delta, np.ones(window)/window, mode='valid')
+            plt.plot(range(window - 1, len(callback.episode_avg_conc_delta)), rolling_gradient, label="100-Episode Rolling Avg", color='darkorange')
+
+        plt.title("Average Gradient Climb Rate (ΔC per Step) per Episode")
+        plt.xlabel("Episode")
+        plt.ylabel("ΔC per Step")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "gradient_climb_rate.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # DWELL TIMES
+        plt.figure(figsize=(10, 4))
+        plt.plot(callback.episode_peak_dwell_times, color='blue', alpha=0.4, label="Dwell Time at Peak")
+
+        window = 100
+        if len(callback.episode_peak_dwell_times) >= window:
+            rolling_dwell = np.convolve(callback.episode_peak_dwell_times, np.ones(window)/window, mode='valid')
+            plt.plot(range(window - 1, len(callback.episode_peak_dwell_times)), rolling_dwell, label="100-Episode Rolling Avg", color='navy')
+
+        plt.title("Dwell Time at Peak Concentration per Episode")
+        plt.xlabel("Episode")
+        plt.ylabel("Steps at Peak (≥95% Max Conc)")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "dwell_time_at_peak.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # STANDARD DEVIATION
+        plt.figure(figsize=(6, 4))
+        # Plot the stddev for each probability separately (since stddevs is 2D)
+        plt.plot([std[0] for std in callback.stddevs], label="Stddev p_w2r", linewidth=0.8)
+        plt.plot([std[1] for std in callback.stddevs], label="Stddev p_r2w", linewidth=0.8)
+        
+        window = 100
+        if len(callback.stddevs) >= window:
+            rolling_std_k_w2r = np.convolve([std[0] for std in callback.stddevs], np.ones(window)/window, mode='valid')
+            rolling_std_k_r2w = np.convolve([std[1] for std in callback.stddevs], np.ones(window)/window, mode='valid')
+            plt.plot(range(window - 1, len(callback.stddevs)), rolling_std_k_w2r, label=f"{window}-Episode Rolling Avg (p_w2r)", color='red', linestyle='--')
+            plt.plot(range(window - 1, len(callback.stddevs)), rolling_std_k_r2w, label=f"{window}-Episode Rolling Avg (p_r2w)", color='blue', linestyle='--')
+
+        plt.title("Standard Deviation of Probabilities Over Time")
+        plt.xlabel("Episode")
+        plt.ylabel("Standard Deviation")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "stddev_probabilities_over_time.png"))
+        plt.close()
+
+
+        #-----------------------------------------------------------------------------------------------------------
+        # FIRST TARGET HIT STEP
+        plt.figure(figsize=(10, 4))
+        plt.plot(callback.first_hit_steps, color='green', alpha=0.4, label="First Hit Step")
+
+        window = 100
+        if len(callback.first_hit_steps) >= window:
+            rolling_first_hit = np.convolve(callback.first_hit_steps, np.ones(window)/window, mode='valid')
+            plt.plot(range(window - 1, len(callback.first_hit_steps)), rolling_first_hit, label="100-Episode Rolling Avg", color='darkgreen')
+
+        plt.title("First Target Hit Step per Episode")
+        plt.xlabel("Episode")
+        plt.ylabel("Step Number")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "first_target_hit_steps.png"))
+        plt.close()
+
+
+    plot_metrics()
+
+    # Save metrics as .pkl
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    metrics_filename = f"RL_models/metrics_trial{trial_number}_atmp{trial_seed}_{timestamp}.pkl"
+    metrics = {
+        "episode_rewards": callback.episode_rewards,
+        "episode_avg_wrapped_distances": callback.episode_avg_wrapped_distances,
+        "episode_avg_unwrapped_distances": callback.episode_avg_unwrapped_distances,
+        "target_hits": callback.target_hits,
+        "episode_end_types": callback.episode_end_types,
+        "mean_actions": callback.mean_actions,
+        "stddevs": callback.stddevs,
+        "entropies": callback.entropies,
+        "first_hit_steps": callback.first_hit_steps,
+        "all_motion_history": callback.all_motion_history,
+        "episode_peak_dwell_times": callback.episode_peak_dwell_times,
+        "episode_avg_conc_delta": callback.episode_avg_conc_delta,
+    }
+
+    with open(metrics_filename, "wb") as f:
+        pickle.dump(metrics, f)
+
+    print(f"[INFO] Trial {trial_number} Attempt {trial_seed} complete. Saved to {metrics_filename}")
+
+print("\n[INFO] All training attempts completed.\n")
