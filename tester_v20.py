@@ -1,4 +1,5 @@
-import gym
+import gymnasium as gym
+from gymnasium import spaces
 from c_elegans_env_v20 import CEMazeEnv, TrainingStatsCallback, ModelAndMetricsCheckpointCallback # type: ignore
 import matplotlib.pyplot as plt
 from stable_baselines3 import SAC
@@ -61,7 +62,7 @@ for attempt, trial_seed in enumerate(seeds, start=1):
 
     # Set up environment
     env = CEMazeEnv()
-    env.seed(trial_seed)
+    env.reset(seed=trial_seed)
 
     # Define SAC model
     model = SAC(

@@ -1,7 +1,7 @@
 # Single State Agent, Multiple sparse rewards, no gradient, state vector WITH memory [prev_p_w2w, time_since_hit]
 
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import patches
