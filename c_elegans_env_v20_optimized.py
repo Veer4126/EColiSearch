@@ -427,8 +427,9 @@ class TrainingStatsCallback(BaseCallback):
             info["all_motion_history"] = self.motion_history  # Send the full history of motion states for the episode
 
         # --- Distance to target ---
-        dists_to_all_unwrapped = np.linalg.norm(raw_env.true_agent_pos - self.targets, axis=1)
-        dists_to_all_wrapped = np.linalg.norm(raw_env.agent_pos - self.targets, axis=1)
+        targets_array = raw_env.targets
+        dists_to_all_unwrapped = np.linalg.norm(raw_env.true_agent_pos - targets_array, axis=1)
+        dists_to_all_wrapped = np.linalg.norm(raw_env.agent_pos - targets_array, axis=1)
 
         # Unwrapped distance to target (across global space)
         unwrapped_dist = np.min(dists_to_all_unwrapped)
