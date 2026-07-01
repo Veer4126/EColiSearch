@@ -47,7 +47,7 @@ from datetime import datetime
 
 # Define seeds and trial number
 trial_number = 36
-seeds = [17]
+seeds = [11, 12, 13, 14]
 
 # Create main output directories
 os.makedirs("RL_models", exist_ok=True)
